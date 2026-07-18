@@ -543,6 +543,18 @@ export class Orchestrator {
           this.params.db.prepare(
             "UPDATE task_graph SET status = 'pending', assigned_to = NULL, started_at = NULL WHERE id = ?",
           ).run(task.id);
+
+          // Mark the dead worker so it's excluded from future reassignment.
+          // Without this, findBusyAgentForReassign() would hand the freed
+          // task straight back to the same dead worker (it only excludes
+          // idle agents, not dead ones), causing an infinite
+          // recover-reassign-die loop that never makes progress.
+          this.params.db.prepare(
+            `UPDATE children SET status = 'dead'
+             WHERE (sandbox_id = ? OR address = ?)
+               AND status NOT IN ('failed', 'dead', 'cleaned_up')`,
+          ).run(task.assignedTo, task.assignedTo);
+          this.params.agentTracker.updateStatus(task.assignedTo!, "dead");
         }
       }
     }
@@ -855,7 +867,15 @@ export class Orchestrator {
        ORDER BY created_at ASC`,
     ).all() as { name: string; address: string; status: string }[];
 
-    const candidate = rows.find((row) => !idleAddresses.has(row.address));
+    const candidate = rows.find((row) => {
+      if (idleAddresses.has(row.address)) return false;
+      // Defense-in-depth: never hand a task to a worker we know is dead,
+      // even if its `children` row wasn't (yet) updated to reflect that.
+      if (this.params.isWorkerAlive && !this.params.isWorkerAlive(row.address)) {
+        return false;
+      }
+      return true;
+    });
     if (!candidate) {
       return null;
     }

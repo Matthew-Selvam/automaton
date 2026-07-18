@@ -78,6 +78,7 @@ function makeOrchestrator(
     inference?: ReturnType<typeof makeInference>;
     config?: any;
     messaging?: ColonyMessaging;
+    isWorkerAlive?: (address: string) => boolean;
   } = {},
 ): Orchestrator {
   const { messaging } = makeMessaging(db);
@@ -89,6 +90,7 @@ function makeOrchestrator(
     inference: overrides.inference ?? (makeInference() as any),
     identity: IDENTITY,
     config: overrides.config ?? {},
+    isWorkerAlive: overrides.isWorkerAlive,
   });
 }
 
@@ -421,6 +423,81 @@ describe("orchestration/Orchestrator", () => {
       expect(result.agentAddress).toBe(IDENTITY.address);
       expect(result.agentName).toBe(IDENTITY.name);
       expect(result.spawned).toBe(false);
+    });
+
+    it("does not reassign to a busy worker that isWorkerAlive reports as dead (#266/#259)", async () => {
+      const goalId = insertGoal(db);
+      // A 'running' child that is actually dead — e.g. its children row
+      // wasn't (yet) updated to 'dead' by the stale-recovery path.
+      db.prepare(
+        "INSERT INTO children (id, name, address, sandbox_id, genesis_prompt, creator_message, funded_amount_cents, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run(ulid(), "DeadWorker", "local://dead-1", "sb-dead", "prompt", "msg", 0, "running", new Date().toISOString());
+
+      const agentTracker = makeAgentTracker({
+        getIdle: vi.fn().mockReturnValue([]),
+        getBestForTask: vi.fn().mockReturnValue(null),
+      });
+      const orc = makeOrchestrator(db, {
+        agentTracker,
+        config: { disableSpawn: true },
+        isWorkerAlive: (address) => address !== "local://dead-1",
+      });
+
+      // Previously findBusyAgentForReassign only excluded idle agents, so it
+      // would hand the task straight back to this dead worker, causing an
+      // infinite recover-reassign-die loop. It should now fall through to
+      // self-assignment instead.
+      const result = await orc.matchTaskToAgent(makeTask(goalId));
+      expect(result.agentAddress).not.toBe("local://dead-1");
+      expect(result.agentAddress).toBe(IDENTITY.address);
+    });
+  });
+
+  // ─── handleExecutingPhase: stale worker recovery ─────────────
+
+  describe("handleExecutingPhase stale worker recovery", () => {
+    it("marks a dead worker's children row dead and updates the tracker (#266/#259)", async () => {
+      const goalId = insertGoal(db, { status: "active" });
+      const deadWorkerAddress = "local://dead-worker";
+      const taskId = insertTask(db, {
+        goalId,
+        status: "assigned",
+        assignedTo: deadWorkerAddress,
+      });
+      db.prepare(
+        "INSERT INTO children (id, name, address, sandbox_id, genesis_prompt, creator_message, funded_amount_cents, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run(ulid(), "DeadWorker", deadWorkerAddress, "sb-dead", "prompt", "msg", 0, "running", new Date().toISOString());
+      setOrchestratorState(db, { phase: "executing", goalId, replanCount: 0, failedTaskId: null, failedError: null });
+
+      const agentTracker = makeAgentTracker({
+        getIdle: vi.fn().mockReturnValue([]),
+        getBestForTask: vi.fn().mockReturnValue(null),
+      });
+      const orc = makeOrchestrator(db, {
+        agentTracker,
+        config: { disableSpawn: true },
+        isWorkerAlive: (address) => address !== deadWorkerAddress,
+      });
+
+      await orc.tick();
+
+      const taskRow = db.prepare("SELECT status, assigned_to FROM task_graph WHERE id = ?").get(taskId) as
+        | { status: string; assigned_to: string | null }
+        | undefined;
+      // The stale task is recovered off the dead worker. Since the dead
+      // worker is now excluded from reassignment, matchTaskToAgent falls
+      // through to self-assignment within the same tick — proving the
+      // fix breaks the recover-reassign-die loop rather than handing the
+      // task straight back to the same dead worker.
+      expect(taskRow?.assigned_to).not.toBe(deadWorkerAddress);
+
+      const childRow = db.prepare("SELECT status FROM children WHERE address = ?").get(deadWorkerAddress) as
+        | { status: string }
+        | undefined;
+      // ...and the dead worker is marked so it's excluded from future
+      // reassignment, breaking the recover-reassign-die loop.
+      expect(childRow?.status).toBe("dead");
+      expect(agentTracker.updateStatus).toHaveBeenCalledWith(deadWorkerAddress, "dead");
     });
   });
 
