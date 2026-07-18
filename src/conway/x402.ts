@@ -40,6 +40,66 @@ const BALANCE_OF_ABI = [
   },
 ] as const;
 
+const EIP712_DOMAIN_ABI = [
+  {
+    inputs: [],
+    name: "name",
+    outputs: [{ name: "", type: "string" }],
+    stateMutability: "view",
+    type: "function",
+  },
+  {
+    inputs: [],
+    name: "version",
+    outputs: [{ name: "", type: "string" }],
+    stateMutability: "view",
+    type: "function",
+  },
+] as const;
+
+// Fallback used only if the token contract doesn't expose name()/version().
+const DEFAULT_EIP712_DOMAIN = { name: "USD Coin", version: "2" };
+
+const eip712DomainCache = new Map<string, { name: string; version: string }>();
+
+export async function getEip712Domain(
+  chain: any,
+  tokenAddress: Address,
+): Promise<{ name: string; version: string }> {
+  const cacheKey = `${chain.id}:${tokenAddress}`;
+  const cached = eip712DomainCache.get(cacheKey);
+  if (cached) return cached;
+
+  try {
+    const rpcUrl = process.env.AUTOMATON_RPC_URL || undefined;
+    const client = createPublicClient({
+      chain,
+      transport: http(rpcUrl, { timeout: 10_000 }),
+    });
+
+    const [name, version] = await Promise.all([
+      client.readContract({
+        address: tokenAddress,
+        abi: EIP712_DOMAIN_ABI,
+        functionName: "name",
+      }),
+      client.readContract({
+        address: tokenAddress,
+        abi: EIP712_DOMAIN_ABI,
+        functionName: "version",
+      }),
+    ]);
+
+    const domain = { name, version };
+    eip712DomainCache.set(cacheKey, domain);
+    return domain;
+  } catch {
+    // Contract doesn't implement name()/version(), or the RPC call failed.
+    // Fall back to the known Base USDC domain rather than fail the payment.
+    return DEFAULT_EIP712_DOMAIN;
+  }
+}
+
 interface PaymentRequirement {
   scheme: string;
   network: NetworkId;
@@ -471,9 +531,13 @@ async function signPayment(
   );
 
   // EIP-712 typed data for TransferWithAuthorization
+  const { name, version } = await getEip712Domain(
+    chain,
+    requirement.usdcAddress,
+  );
   const domain = {
-    name: "USD Coin",
-    version: "2",
+    name,
+    version,
     chainId: chain.id,
     verifyingContract: requirement.usdcAddress,
   } as const;
