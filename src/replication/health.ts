@@ -45,8 +45,14 @@ export class ChildHealthMonitor {
         return { childId, healthy: false, lastSeen: null, uptime: null, creditBalance: null, issues: ["child not found"] };
       }
 
+      // Scope the client to the CHILD's sandbox. Without this the exec runs on
+      // the PARENT sandbox, so every check reports the parent's /health and
+      // every child looks healthy whenever the parent is. This is the same
+      // pattern used in replication/spawn.ts and agent/tools.ts.
+      const childConway = this.conway.createScopedClient(childRow.sandbox_id);
+
       // Execute status check in sandbox
-      const result = await this.conway.exec(
+      const result = await childConway.exec(
         `curl -sf http://localhost:3000/health 2>/dev/null || echo '{"status":"offline"}'`,
         10_000,
       );

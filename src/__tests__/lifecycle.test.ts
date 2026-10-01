@@ -337,6 +337,32 @@ describe("ChildHealthMonitor", () => {
     lifecycle.transition(id, "healthy");
   }
 
+  it("checkHealth scopes the client to the CHILD's sandbox", async () => {
+    // Regression: checkHealth looked up the child's sandbox_id and then used
+    // the PARENT-scoped client, so every check hit the parent's /health and
+    // every child looked healthy whenever the parent did. The mock's
+    // createScopedClient returns `this`, which is why the pre-existing
+    // healthy/offline tests could not detect it - so assert on the scoping
+    // call itself.
+    makeHealthyChild("child-1");
+
+    const scopedFor: string[] = [];
+    vi.spyOn(conway, "createScopedClient").mockImplementation((sandboxId: string) => {
+      scopedFor.push(sandboxId);
+      return conway;
+    });
+    vi.spyOn(conway, "exec").mockResolvedValue({
+      stdout: '{"status":"healthy","uptime":10}',
+      stderr: "",
+      exitCode: 0,
+    });
+
+    const monitor = new ChildHealthMonitor(db, conway, lifecycle);
+    await monitor.checkHealth("child-1");
+
+    expect(scopedFor).toEqual(["sandbox-child-1"]);
+  });
+
   it("checkHealth returns healthy for running child", async () => {
     makeHealthyChild("child-1");
 
@@ -521,6 +547,56 @@ describe("SandboxCleanup", () => {
     expect(count).toBe(1); // Only the old one
     expect(lifecycle.getCurrentState("child-1")).toBe("cleaned_up");
     expect(lifecycle.getCurrentState("child-2")).toBe("failed"); // Still failed (recent)
+  });
+
+  it("cleanupStale does not reap a child checked earlier the same day", async () => {
+    // Regression: the cutoff was built as a JS ISO string while last_checked is
+    // written by datetime('now'). Lexicographically 'T' > ' ', so a 24h cutoff
+    // matched every child whose last_checked fell later on the SAME DATE as the
+    // cutoff - including one checked seconds ago. The 48h case above passed only
+    // because it crosses a date boundary, where the separator is irrelevant.
+    lifecycle.initChild("child-recent", "recent", "sandbox-recent", "genesis");
+    lifecycle.transition("child-recent", "failed");
+
+    // Build the fixture from the cutoff itself rather than from "now", so it
+    // is same-day no matter what time the suite runs. 23:59 on the cutoff's
+    // date is later than any cutoff time-of-day, so the child is definitively
+    // NOT stale while still exercising the same-date comparison.
+    db.prepare(
+      `UPDATE children
+          SET last_checked = datetime(date('now', ?), '23:59:00')
+        WHERE id = ?`,
+    ).run("-24 hours", "child-recent");
+
+    const row = db
+      .prepare("SELECT last_checked FROM children WHERE id = ?")
+      .get("child-recent") as { last_checked: string };
+    const cutoffDay = db.prepare("SELECT date('now', '-24 hours') AS v").get() as { v: string };
+    const cutoff = db.prepare("SELECT datetime('now', '-24 hours') AS v").get() as { v: string };
+
+    // Guard against a vacuous test: same date as the cutoff, and strictly
+    // later in the day, which is exactly the case the old comparison got wrong.
+    expect(row.last_checked.slice(0, 10)).toBe(cutoffDay.v);
+    expect(row.last_checked.slice(11)).toBe("23:59:00");
+    expect(row.last_checked > cutoff.v).toBe(true);
+
+    const cleanup = new SandboxCleanup(conway, lifecycle, db);
+    const count = await cleanup.cleanupStale(24);
+
+    expect(count).toBe(0);
+    expect(lifecycle.getCurrentState("child-recent")).toBe("failed");
+  });
+
+  it("cleanupStale reaps a child genuinely past the threshold", async () => {
+    lifecycle.initChild("child-old", "old", "sandbox-old", "genesis");
+    lifecycle.transition("child-old", "failed");
+    db.prepare("UPDATE children SET last_checked = datetime('now', '-30 hours') WHERE id = ?").run(
+      "child-old",
+    );
+
+    const cleanup = new SandboxCleanup(conway, lifecycle, db);
+    expect(await cleanup.cleanupStale(24)).toBe(1);
+    expect(lifecycle.getCurrentState("child-old")).toBe("cleaned_up");
   });
 });
 

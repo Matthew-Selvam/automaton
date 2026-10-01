@@ -65,10 +65,20 @@ export class SandboxCleanup {
    * Clean up children that have been in stopped/failed state for too long.
    */
   async cleanupStale(maxAgeHours: number): Promise<number> {
-    const cutoff = new Date(Date.now() - maxAgeHours * 3600_000).toISOString();
-    const stale = this.db.prepare(
-      "SELECT id FROM children WHERE status IN ('failed', 'stopped') AND last_checked < ?",
-    ).all(cutoff) as Array<{ id: string }>;
+    // Compute the cutoff as an SQLite datetime modifier rather than a JS
+    // string. `children.last_checked` is written by `datetime('now')`
+    // ("YYYY-MM-DD HH:MM:SS"), and a bound ISO string
+    // ("YYYY-MM-DDTHH:MM:SS.sssZ") compares lexicographically with 'T' > ' ',
+    // so it matched every child checked later on the cutoff's own date - not
+    // just the genuinely stale ones. Letting SQLite do the arithmetic keeps
+    // both sides in the same format.
+    const stale = this.db
+      .prepare(
+        `SELECT id FROM children
+          WHERE status IN ('failed', 'stopped')
+            AND last_checked < datetime('now', ?)`,
+      )
+      .all(`-${maxAgeHours} hours`) as Array<{ id: string }>;
 
     let cleaned = 0;
     for (const child of stale) {
