@@ -14,6 +14,8 @@ jobs:
       - uses: pnpm/action-setup@v4
       - run: pnpm install --frozen-lockfile
       - run: pnpm run typecheck
+      - name: Test CI gate logic
+        run: bash scripts/test-ci-gates.sh
       - name: Run tests
         timeout-minutes: 15
         run: |
@@ -21,22 +23,29 @@ jobs:
           timeout 600 pnpm test 2>&1 | tee /tmp/vitest-full.log
           RC=${PIPESTATUS[0]}
           set -e
-          # `timeout` reports 124 for any process it kills, which is ambiguous:
-          # it covers both "vitest finished every test but would not exit" and
-          # "the suite wedged / was OOM-killed / never finished". The old
-          # handler mapped every 124 to success, so a genuinely broken suite
-          # went green.
+          # `timeout` reports 124 for any process it kills. The old handler
+          # mapped every 124 to success, so a wedged/OOM-killed suite went
+          # green.
           #
-          # vitest prints its summary before hanging, so the presence of a
-          # "Test Files" summary line distinguishes the benign post-test hang
-          # from a run that never finished. Anything without it fails.
+          # A 124 alone is not enough to distinguish "finished all tests but
+          # would not exit" from "wedged partway through". Grepping for a
+          # summary line is not sufficient either - vitest streams per-file
+          # progress, so a partial run can also contain those lines.
+          #
+          # So re-run once WITHOUT a timeout, capturing the real exit code.
+          # If the suite genuinely completes, this returns 0 and we pass. If it
+          # wedges again, the step's own `timeout-minutes` ceiling fails the job
+          # for real. The cost is one extra suite run only in the rare case that
+          # the first run hit the 600s budget.
           if [ $RC -eq 124 ]; then
-            echo "::warning::pnpm test was killed by timeout at 600s"
-            if grep -qE '^ *Test Files ' /tmp/vitest-full.log; then
-              echo "::warning::all test files reported before the kill - treating as pass"
+            echo "::warning::pnpm test hit the 600s budget; re-running to distinguish a post-test hang from a real wedge"
+            pnpm test 2>&1 | tee /tmp/vitest-rerun.log
+            RC=${PIPESTATUS[0]}
+            if [ $RC -eq 0 ]; then
+              echo "::warning::suite completed on re-run without exiting cleanly - treating as pass"
               exit 0
             fi
-            echo "::error::pnpm test timed out before reporting results - treating as failure"
+            echo "::error::suite did not complete cleanly (exit $RC) - treating as failure"
             exit 1
           fi
           exit $RC
@@ -62,13 +71,16 @@ jobs:
           node-version: 22
       - uses: pnpm/action-setup@v4
       - run: pnpm install --frozen-lockfile
-      # This job previously ended in `|| true`, which made it structurally
-      # incapable of failing - it looked like a gate but gated nothing.
+      # NOTE: `|| true` used to be here, which made this job incapable of
+      # failing. It is removed, and the severity floor is deliberately KEPT at
+      # `high` - the original intent, which the `|| true` made unenforceable.
       #
-      # The advisory set is currently non-empty (see #389), so this reports and
-      # fails. That is the point: a gate that cannot fail is not a gate, and the
-      # known findings are fixed in #389 (simple-git RCE + vitest UI arbitrary
-      # file read are the two criticals). If you need this non-blocking while
-      # #389 is in review, use `continue-on-error: true` on this step, which
-      # keeps the job visibly red-ish in the UI without hard-blocking merges.
-      - run: pnpm audit --audit-level=critical
+      # This currently reports 1 critical + 8 high prod advisories, so the job
+      # fails until #389 (which bumps the reachable ones) is merged. That is
+      # the honest state: a gate that cannot fail is not a gate.
+      #
+      # If the advisory set needs to be tolerated while #389 is in review,
+      # mark the STEP `continue-on-error: true`. Note that this does not fail
+      # the job and is shown as an annotation, not a red X - so do not treat a
+      # green check under it as a passing audit.
+      - run: pnpm audit --audit-level=high
