@@ -15,23 +15,42 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm run typecheck
       - name: Run tests
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
           set +e
-          timeout 300 pnpm test
-          RC=$?
+          timeout 600 pnpm test 2>&1 | tee /tmp/vitest-full.log
+          RC=${PIPESTATUS[0]}
           set -e
-          # Exit code 124 means timeout killed the process (vitest hung after tests completed)
-          if [ $RC -eq 124 ]; then echo "::warning::vitest process hung after tests, killed by timeout"; exit 0; fi
+          # `timeout` reports 124 for any process it kills, which is ambiguous:
+          # it covers both "vitest finished every test but would not exit" and
+          # "the suite wedged / was OOM-killed / never finished". The old
+          # handler mapped every 124 to success, so a genuinely broken suite
+          # went green.
+          #
+          # vitest prints its summary before hanging, so the presence of a
+          # "Test Files" summary line distinguishes the benign post-test hang
+          # from a run that never finished. Anything without it fails.
+          if [ $RC -eq 124 ]; then
+            echo "::warning::pnpm test was killed by timeout at 600s"
+            if grep -qE '^ *Test Files ' /tmp/vitest-full.log; then
+              echo "::warning::all test files reported before the kill - treating as pass"
+              exit 0
+            fi
+            echo "::error::pnpm test timed out before reporting results - treating as failure"
+            exit 1
+          fi
           exit $RC
       - name: Run security tests
         timeout-minutes: 10
         run: |
           set +e
-          timeout 180 pnpm test -- --grep "security|injection|policy|financial"
-          RC=$?
+          timeout 300 pnpm run test:security 2>&1 | tee /tmp/vitest-security.log
+          RC=${PIPESTATUS[0]}
           set -e
-          if [ $RC -eq 124 ]; then echo "::warning::vitest process hung after tests, killed by timeout"; exit 0; fi
+          if [ $RC -eq 124 ]; then
+            echo "::error::security test run timed out - treating as failure"
+            exit 1
+          fi
           exit $RC
 
   security-audit:
@@ -43,4 +62,13 @@ jobs:
           node-version: 22
       - uses: pnpm/action-setup@v4
       - run: pnpm install --frozen-lockfile
-      - run: pnpm audit --audit-level=high || true
+      # This job previously ended in `|| true`, which made it structurally
+      # incapable of failing - it looked like a gate but gated nothing.
+      #
+      # The advisory set is currently non-empty (see #389), so this reports and
+      # fails. That is the point: a gate that cannot fail is not a gate, and the
+      # known findings are fixed in #389 (simple-git RCE + vitest UI arbitrary
+      # file read are the two criticals). If you need this non-blocking while
+      # #389 is in review, use `continue-on-error: true` on this step, which
+      # keeps the job visibly red-ish in the UI without hard-blocking merges.
+      - run: pnpm audit --audit-level=critical
