@@ -26,8 +26,8 @@ export function createDefaultAlertRules(): AlertRule[] {
       message: "Heartbeat task failure rate exceeds 20%",
       cooldownMs: 15 * 60 * 1000, // 15 min
       condition: (metrics: MetricSnapshot) => {
-        const failures = metrics.counters.get("heartbeat_task_failures_total") ?? 0;
-        const successes = metrics.counters.get("heartbeat_task_successes_total") ?? 0;
+        const failures = metrics.gauges.get("heartbeat_task_failures_total") ?? 0;
+        const successes = metrics.gauges.get("heartbeat_task_successes_total") ?? 0;
         const total = failures + successes;
         if (total === 0) return false;
         return failures / total > 0.2;
@@ -39,8 +39,8 @@ export function createDefaultAlertRules(): AlertRule[] {
       message: "Policy deny rate exceeds 50%",
       cooldownMs: 15 * 60 * 1000, // 15 min
       condition: (metrics: MetricSnapshot) => {
-        const denies = metrics.counters.get("policy_denies_total") ?? 0;
-        const total = metrics.counters.get("policy_decisions_total") ?? 0;
+        const denies = metrics.gauges.get("policy_denies_total") ?? 0;
+        const total = metrics.gauges.get("policy_decisions_total") ?? 0;
         if (total < 10) return false; // Need minimum sample size
         return denies / total > 0.5;
       },
@@ -62,7 +62,7 @@ export function createDefaultAlertRules(): AlertRule[] {
       message: "Daily inference cost exceeding 80% of cap",
       cooldownMs: 30 * 60 * 1000, // 30 min
       condition: (metrics: MetricSnapshot) => {
-        const cost = metrics.counters.get("inference_cost_cents") ?? 0;
+        const cost = metrics.gauges.get("inference_cost_cents") ?? 0;
         // 500 cents ($5) daily default cap
         return cost > 400;
       },
@@ -87,7 +87,7 @@ export function createDefaultAlertRules(): AlertRule[] {
         // Use windowed gauge if available; fall back to cumulative counter only
         // when the gauge hasn't been set yet (-1 sentinel).
         if (turnsLastHour >= 0) return turnsLastHour === 0;
-        const turnsTotal = metrics.counters.get("turns_total") ?? -1;
+        const turnsTotal = metrics.gauges.get("turns_total") ?? -1;
         // If turns_total was never set, assume we just started — don't alert
         if (turnsTotal < 0) return false;
         return turnsTotal === 0;

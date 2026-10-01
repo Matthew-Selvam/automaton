@@ -783,11 +783,12 @@ describe("AlertEngine", () => {
       const engine = new AlertEngine();
       // 3 failures out of 10 total = 30% > 20% threshold
       const snapshot: MetricSnapshot = {
-        counters: new Map([
+        counters: new Map(),
+        gauges: new Map([
+          ["balance_cents", 10000],
           ["heartbeat_task_failures_total", 3],
           ["heartbeat_task_successes_total", 7],
         ]),
-        gauges: new Map([["balance_cents", 10000]]),
         histograms: new Map(),
       };
 
@@ -800,11 +801,12 @@ describe("AlertEngine", () => {
       const engine = new AlertEngine();
       // 1 failure out of 10 total = 10% < 20% threshold
       const snapshot: MetricSnapshot = {
-        counters: new Map([
+        counters: new Map(),
+        gauges: new Map([
+          ["balance_cents", 10000],
           ["heartbeat_task_failures_total", 1],
           ["heartbeat_task_successes_total", 9],
         ]),
-        gauges: new Map([["balance_cents", 10000]]),
         histograms: new Map(),
       };
 
@@ -816,11 +818,12 @@ describe("AlertEngine", () => {
     it("policy_high_deny_rate fires when deny ratio exceeds 50%", () => {
       const engine = new AlertEngine();
       const snapshot: MetricSnapshot = {
-        counters: new Map([
+        counters: new Map(),
+        gauges: new Map([
+          ["balance_cents", 10000],
           ["policy_denies_total", 8],
           ["policy_decisions_total", 15],
         ]),
-        gauges: new Map([["balance_cents", 10000]]),
         histograms: new Map(),
       };
 
@@ -832,11 +835,12 @@ describe("AlertEngine", () => {
     it("policy_high_deny_rate does not fire with insufficient sample size", () => {
       const engine = new AlertEngine();
       const snapshot: MetricSnapshot = {
-        counters: new Map([
+        counters: new Map(),
+        gauges: new Map([
+          ["balance_cents", 10000],
           ["policy_denies_total", 5],
           ["policy_decisions_total", 5],
         ]),
-        gauges: new Map([["balance_cents", 10000]]),
         histograms: new Map(),
       };
 
@@ -865,8 +869,11 @@ describe("AlertEngine", () => {
     it("inference_budget_warning fires when cost > 400", () => {
       const engine = new AlertEngine();
       const snapshot: MetricSnapshot = {
-        counters: new Map([["inference_cost_cents", 450]]),
-        gauges: new Map([["balance_cents", 10000]]),
+        counters: new Map(),
+        gauges: new Map([
+          ["balance_cents", 10000],
+          ["inference_cost_cents", 450],
+        ]),
         histograms: new Map(),
       };
 

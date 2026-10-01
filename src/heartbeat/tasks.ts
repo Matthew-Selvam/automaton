@@ -444,6 +444,66 @@ export const BUILTIN_TASKS: Record<string, HeartbeatTaskFn> = {
       metrics.gauge("balance_cents", ctx.creditBalance);
       metrics.gauge("survival_tier", tierToInt(ctx.survivalTier));
 
+      // The remaining alert rules read metric names that nothing produced, so
+      // six of the seven default rules were permanently inert: every condition
+      // saw its `?? 0` / `?? -1` fallback and returned false. Derive them here
+      // from the tables the agent already writes, so the rules evaluate against
+      // real data instead of defaults.
+      //
+      // Each query is independent and wrapped, because this task must never
+      // fail the tick just because one counter is unavailable.
+      const raw = ctx.db;
+      const scalar = (sql: string, ...params: unknown[]): number => {
+        try {
+          const row = raw.prepare(sql).get(...params) as { v: number | null } | undefined;
+          return Number(row?.v ?? 0);
+        } catch (error) {
+          logger.debug("Alert metric query failed", {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return 0;
+        }
+      };
+
+      metrics.gauge(
+        "turns_last_hour",
+        scalar("SELECT COUNT(*) AS v FROM turns WHERE timestamp >= datetime('now', '-1 hour')"),
+      );
+      metrics.gauge(
+        "turns_total",
+        scalar("SELECT COUNT(*) AS v FROM turns"),
+      );
+      metrics.gauge(
+        "policy_denies_total",
+        scalar("SELECT COUNT(*) AS v FROM policy_decisions WHERE decision = 'deny'"),
+      );
+      metrics.gauge(
+        "policy_decisions_total",
+        scalar("SELECT COUNT(*) AS v FROM policy_decisions"),
+      );
+      metrics.gauge(
+        "inference_cost_cents",
+        scalar("SELECT COALESCE(SUM(cost_cents), 0) AS v FROM inference_costs WHERE created_at >= date('now')"),
+      );
+      metrics.gauge(
+        "heartbeat_task_failures_total",
+        scalar(
+          "SELECT COUNT(*) AS v FROM heartbeat_history WHERE result IN ('failure','timeout') AND started_at >= datetime('now', '-1 hour')",
+        ),
+      );
+      metrics.gauge(
+        "heartbeat_task_successes_total",
+        scalar(
+          "SELECT COUNT(*) AS v FROM heartbeat_history WHERE result = 'success' AND started_at >= datetime('now', '-1 hour')",
+        ),
+      );
+      metrics.gauge(
+        "unhealthy_child_count",
+        scalar(
+          "SELECT COUNT(*) AS v FROM children WHERE status NOT IN ('healthy','running','cleaned_up')",
+        ),
+      );
+
       // Evaluate alerts
       const firedAlerts = alerts.evaluate(metrics);
 
