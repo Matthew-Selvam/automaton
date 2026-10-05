@@ -16,6 +16,7 @@ import type {
 } from "../types.js";
 import { DEFAULT_TOKEN_BUDGET } from "../types.js";
 import { createTokenCounter } from "../memory/context-manager.js";
+import { getMetrics } from "../observability/metrics.js";
 
 const MAX_CONTEXT_TURNS = 20;
 const SUMMARY_THRESHOLD = 15;
@@ -228,6 +229,13 @@ export function buildContextMessages(
       content: `[${pendingInput.source}] ${pendingInput.content}`,
     });
   }
+
+  // Report context size as a gauge for alert monitoring
+  const totalTokens = messages.reduce((sum, msg) => {
+    const content = typeof msg.content === "string" ? msg.content : "";
+    return sum + estimateTokens(content);
+  }, 0);
+  getMetrics().gauge("context_tokens_total", totalTokens);
 
   return messages;
 }
